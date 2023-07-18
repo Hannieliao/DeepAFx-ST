@@ -30,7 +30,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "ckpt_dir",
+        "--ckpt_dir",
         help="Top level directory containing model checkpoints to evaluate",
     )
     parser.add_argument(
@@ -161,7 +161,7 @@ if __name__ == "__main__":
     else:
         device = "cpu"
         
-    sample_rate = 24000
+    sample_rate = 48000
     # # ---- setup the dataset ----
     # if not args.real:
     #     eval_dataset = AudioDataset(
@@ -285,7 +285,7 @@ if __name__ == "__main__":
             model.hparams.dsp_mode = DSPMode.INFER
         elif processor_model_id == "proxy2" or processor_model_id == "proxy2m":
             # peq_ckpt = [pc for pc in pckpts if "peq" in pc][0]
-            # comp_ckpt = [pc for pc in pckpts if "comp" in pc][0]
+            # comp_ckpt = [pc for pc in pckpts if "comp" in pc][0]  
             proxy_ckpts = [peq_ckpt, comp_ckpt]
             print(f"Found {len(proxy_ckpts)}: {proxy_ckpts}")
             model = (
@@ -358,7 +358,7 @@ if __name__ == "__main__":
     if len(list(models.keys())) < 1:
         raise ValueError("No checkpoints found for evaluation. Exiting...")
 
-    # create the baseline model
+    # create the baseline model  
     baseline_model = BaselineEQAndComp(sample_rate=sample_rate)
     models[f"Baseline ({args.dataset})"] = baseline_model
 
@@ -385,166 +385,177 @@ if __name__ == "__main__":
     # ---- start the evaluation ----
     # for bidx, batch in enumerate(eval_dataset, 0):
     #     x, y = batch
-        
-    file1 = ""
-    file2 = ""
-    x, x_sr = torchaudio.load(file1)
-    y, y_sr = torchaudio.load(file2)
+    folder_path = dataset_dir
+
+    x_files = glob.glob(os.path.join(folder_path, "*)].wav"))
+    y_files = glob.glob(os.path.join(folder_path, "*_histen9.0xin2out.wav"))
     
-    # resample if needed
-    if x_sr != 24000:
-        print("Resampling to 24000 Hz...")
-        x_24000 = torch.tensor(resampy.resample(x.view(-1).numpy(), x_sr, 24000))
-        x_24000 = x_24000.view(1, -1)
-    else:
+    if len(x_files) != len(y_files):
+        raise ValueError("The number of x and y must be the same")
+        
+    total_audio_files = len(x_files) + len(y_files)
+
+    for idx, (x_file, y_file) in enumerate(zip(x_files, y_files), 1):
+
+        x, x_sr = torchaudio.load(x_file)
+        y, y_sr = torchaudio.load(y_file)
+    
+    # # resample if needed
+    # if x_sr != 24000:
+    #     print("Resampling to 24000 Hz...")
+    #     x_24000 = torch.tensor(resampy.resample(x.view(-1).numpy(), x_sr, 24000))
+    #     x_24000 = x_24000.view(1, -1)
+    # else:
+    #     x_24000 = x
+
+    # if y_sr != 24000:
+    #     print("Resampling to 24000 Hz...")
+    #     y_24000 = torch.tensor(resampy.resample(y.view(-1).numpy(), y_sr, 24000))
+    #     y_24000 = y_24000.view(1, -1)
+    # else:
+    #     y_24000 = y
+
+    # peak normalize to -12 dBFS
+    # x_24000 = x_24000[0:1, : 24000 * 5]
+        x /= x.abs().max()
         x_24000 = x
+        x_24000 *= 10 ** (-12 / 20.0)
+        # x_24000 = x_24000.view(1, 1, -1)
 
-    if y_sr != 24000:
-        print("Resampling to 24000 Hz...")
-        y_24000 = torch.tensor(resampy.resample(r.view(-1).numpy(), r_sr, 24000))
-        y_24000 = y_24000.view(1, -1)
-    else:
+        # peak normalize to -12 dBFS
+        # y_24000 = y_24000[0:1, : 24000 * 5]
+        y /= y.abs().max()
         y_24000 = y
+        y_24000 *= 10 ** (-12 / 20.0)
+        # y_24000 = y_24000.view(1, 1, -1)
 
-    # peak normalize to -12 dBFS
-    x_24000 = x_24000[0:1, : 24000 * 5]
-    x_24000 /= x_24000.abs().max()
-    x_24000 *= 10 ** (-12 / 20.0)
-    x_24000 = x_24000.view(1, 1, -1)
+        x = x_24000.to(device)
+        y = y_24000.to(device)
 
-    # peak normalize to -12 dBFS
-    y_24000 = y_24000[0:1, : 24000 * 5]
-    y_24000 /= y_24000.abs().max()
-    y_24000 *= 10 ** (-12 / 20.0)
-    y_24000 = y_24000.view(1, 1, -1)
+        # sum to mono
+        x = x.mean(0, keepdim=True)
+        y = y.mean(0, keepdim=True)
+        # print(x.shape, y.shape)
 
-    x = x.to(device)
-    y = y.to(device)
+        # split inputs in half for style transfer
+        length = x.shape[-1]
+        x_A = x[..., : length // 2]
+        x_B = x[..., length // 2 :]
 
-    # sum to mono
-    x = x.mean(0, keepdim=True)
-    y = y.mean(0, keepdim=True)
-    # print(x.shape, y.shape)
+        y_A = y[..., : length // 2]
+        y_B = y[..., length // 2 :]
 
-    # split inputs in half for style transfer
-    length = x.shape[-1]
-    x_A = x[..., : length // 2]
-    x_B = x[..., length // 2 :]
+        if torch.rand(1).sum() > 0.5:
+            y_ref = y_B
+            y = y_A
+            x = x_A
+        else:
+            y_ref = y_A
+            y = y_B
+            x = x_B
 
-    y_A = y[..., : length // 2]
-    y_B = y[..., length // 2 :]
+            # corrupted input peak normalized to -3 dBFS
+            # x_norm = x / x.abs().max()
+            # x_norm *= 10 ** (-12.0 / 20)
 
-    if torch.rand(1).sum() > 0.5:
-        y_ref = y_B
-        y = y_A
-        x = x_A
-    else:
-        y_ref = y_A
-        y = y_B
-        x = x_B
-
-        # corrupted input peak normalized to -3 dBFS
-        # x_norm = x / x.abs().max()
-        # x_norm *= 10 ** (-12.0 / 20)
-
-        # compute metrics with the corrupt input
-    for metric_name, metric in metrics.items():
-        if metric_name not in metrics_dict["Corrupt"]:
-            metrics_dict["Corrupt"][metric_name] = []
-
-        try:
-            val = metric(x.cpu().view(1, 1, -1), y.cpu().view(1, 1, -1))
-        except:
-            val = -1
-        metrics_dict["Corrupt"][metric_name].append(val)
-
-    outputs = {}
-    # now iterate over models and compute metrics
-    for model_name, model in models.items():
-        if model_name not in metrics_dict:
-            metrics_dict[model_name] = {}
-
-        # forward pass through model
-        with torch.no_grad():
-            if "Baseline" in model_name:
-                y_hat = model(
-                    x.cpu().view(1, 1, -1).clone(),
-                    y_ref.cpu().view(1, 1, -1).clone(),
-                )
-            else:
-                y_hat, p, e = model(
-                    x.view(1, 1, -1).clone(),
-                    y=y_ref.view(1, 1, -1).clone(),
-                    dsp_mode=model.hparams.dsp_mode,
-                    sample_rate=sample_rate,
-                    analysis_length=131072,
-                )
-
-        print(p)
-        y_hat = y_hat.cpu()
-        y = y.cpu()
-        outputs[model_name] = y_hat  # store
-
-        # compute all metrics
+            # compute metrics with the corrupt input
         for metric_name, metric in metrics.items():
-            if metric_name not in metrics_dict[model_name]:
-                metrics_dict[model_name][metric_name] = []
+            if metric_name not in metrics_dict["Corrupt"]:
+                metrics_dict["Corrupt"][metric_name] = []
 
             try:
-                val = metric(y_hat.view(1, 1, -1), y.view(1, 1, -1))
+                val = metric(x.cpu().view(1, 1, -1), y.cpu().view(1, 1, -1))
             except:
                 val = -1
-            metrics_dict[model_name][metric_name].append(val)
+            metrics_dict["Corrupt"][metric_name].append(val)
+
+        outputs = {}
+        # now iterate over models and compute metrics
+        for model_name, model in models.items():
+            if model_name not in metrics_dict:
+                metrics_dict[model_name] = {}
+
+            # forward pass through model
+            with torch.no_grad():
+                if "Baseline" in model_name:
+                    y_hat = model(
+                        x.cpu().view(1, 1, -1).clone(),
+                        y_ref.cpu().view(1, 1, -1).clone(),
+                    )
+                else:
+                    y_hat, p, e = model(
+                        x.view(1, 1, -1).clone(),
+                        y=y_ref.view(1, 1, -1).clone(),
+                        dsp_mode=model.hparams.dsp_mode,
+                        sample_rate=sample_rate,
+                        analysis_length=131072,
+                    )
+
+            print(p)
+            y_hat = y_hat.cpu()
+            y = y.cpu()
+            outputs[model_name] = y_hat  # store
+
+            # compute all metrics
+            for metric_name, metric in metrics.items():
+                if metric_name not in metrics_dict[model_name]:
+                    metrics_dict[model_name][metric_name] = []
+
+                try:
+                    val = metric(y_hat.view(1, 1, -1), y.view(1, 1, -1))
+                except:
+                    val = -1
+                metrics_dict[model_name][metric_name].append(val)
+
+            if args.save:
+                y_hat_filepath = os.path.join(
+                    eval_dir, f"{idx:04d}_{model_name}_y_hat.wav"
+                )
+                torchaudio.save(y_hat_filepath, y_hat.view(1, -1), sample_rate)
 
         if args.save:
-            y_hat_filepath = os.path.join(
-                eval_dir, f"{model_name}_y_hat.wav"
-            )
-            torchaudio.save(y_hat_filepath, y_hat.view(1, -1), sample_rate)
+            x_filepath = os.path.join(eval_dir, f"{idx:04d}_x.wav")
+            y_filepath = os.path.join(eval_dir, f"{idx:04d}_y.wav")
+            torchaudio.save(x_filepath, x.view(1, -1).cpu(), sample_rate)
+            torchaudio.save(y_filepath, y.view(1, -1).cpu(), sample_rate)
 
-    if args.save:
-        x_filepath = os.path.join(eval_dir, f"x.wav")
-        y_filepath = os.path.join(eval_dir, f"y.wav")
-        torchaudio.save(x_filepath, x.view(1, -1).cpu(), sample_rate)
-        torchaudio.save(y_filepath, y.view(1, -1).cpu(), sample_rate)
+        print(idx + 1)
 
-    # print(bidx + 1)
-    for model_name, model_metrics in metrics_dict.items():
-        sys.stdout.write(f"\n {model_name:22} ")
-        for metric_name, metric_list in model_metrics.items():
-            sys.stdout.write(f"{metric_name}: {np.mean(metric_list):0.3f}  ")
-        sys.stdout.flush()
-    print()
-    print("-" * 32)
+        for model_name, model_metrics in metrics_dict.items():
+            sys.stdout.write(f"\n {model_name:22} ")
+            for metric_name, metric_list in model_metrics.items():
+                sys.stdout.write(f"{metric_name}: {np.mean(metric_list):0.3f}  ")
+            sys.stdout.flush()
+        print()
+        print("-" * 32)
 
-    # if bidx + 1 == args.examples:
-    print("Evaluation complete.")
-    json_metrics_dict = {}
-    for model_name, model_metrics in metrics_dict.items():
-        if model_name not in json_metrics_dict:
-            json_metrics_dict[model_name] = {}
-        for metric_name, metric_list in model_metrics.items():
-            if metric_name not in json_metrics_dict:
-                sanitized_metric_list = []
-                for elm in metric_list:
-                    if isinstance(elm, torch.Tensor):
-                        sanitized_metric_list.append(elm.numpy().tolist())
-                    else:
-                        sanitized_metric_list.append(elm)
+        if idx + 1 == args.examples:
+            print("Evaluation complete.")
+            json_metrics_dict = {}
+            for model_name, model_metrics in metrics_dict.items():
+                if model_name not in json_metrics_dict:
+                    json_metrics_dict[model_name] = {}
+                for metric_name, metric_list in model_metrics.items():
+                    if metric_name not in json_metrics_dict:
+                        sanitized_metric_list = []
+                        for elm in metric_list:
+                            if isinstance(elm, torch.Tensor):
+                                sanitized_metric_list.append(elm.numpy().tolist())
+                            else:
+                                sanitized_metric_list.append(elm)
 
-                json_metrics_dict[model_name][
-                    metric_name
-                ] = sanitized_metric_list
-    with open(
-        os.path.join(
-            eval_dir,
-            f"{args.dataset.lower()}_{args.checkpoint_loss}_results.json",
-        ),
-        "w",
-    ) as fp:
-        json.dump(json_metrics_dict, fp, indent=True)
+                        json_metrics_dict[model_name][
+                            metric_name
+                        ] = sanitized_metric_list
+            with open(
+                os.path.join(
+                    eval_dir,
+                    f"{args.dataset.lower()}_{args.checkpoint_loss}_results.json",
+                ),
+                "w",
+            ) as fp:
+                json.dump(json_metrics_dict, fp, indent=True)
 
-    for model_name, model in models.items():
-        del model
-
+            for model_name, model in models.items():
+                del model
         # break
