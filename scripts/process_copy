@@ -120,14 +120,14 @@ if __name__ == "__main__":
 
     # peak normalize to -12 dBFS 只取了单声道
     x_24000 = x_24000[0:1, : 24000 * 5] # x_24000[0:1, : 24000 * 5] 
-    x_24000 /= x_24000.abs().max()
-    x_24000 *= 10 ** (-12 / 20.0)
+    # x_24000 /= x_24000.abs().max()
+    # x_24000 *= 10 ** (-12 / 20.0)
     x_24000 = x_24000.view(1, 1, -1) # x_24000.view(1, 1, -1)
 
     # peak normalize to -12 dBFS
     r_24000 = r_24000[0:1, : 24000 * 5] # r_24000[0:1, : 24000 * 5]
-    r_24000 /= r_24000.abs().max()
-    r_24000 *= 10 ** (-12 / 20.0)
+    # r_24000 /= r_24000.abs().max()
+    # r_24000 *= 10 ** (-12 / 20.0)
     r_24000 = r_24000.view(1, 1, -1) # r_24000.view(1, 1, -1)
 
     if args.gpu:
@@ -175,8 +175,7 @@ if __name__ == "__main__":
     y_hat = y_hat.view(1, -1)
     y_hat /= y_hat.abs().max()
     x_24000 /= x_24000.abs().max()
-    r_24000 /= r_24000.abs().max() # 添加代码
-    # print("Parameter:", p_peq)
+    r_24000 /= r_24000.abs().max() 
 
     # save to disk
     dirname = os.path.dirname(args.input)
@@ -186,22 +185,68 @@ if __name__ == "__main__":
     in_filepath = os.path.join(dirname, f"{filename}_in.wav")
     reference_filepath = os.path.join(dirname, f"{filename}_ref.wav")
     print(f"Saved output to {out_filepath}")
-    print (p)
-    import torchaudio
-
-    # # Save output to disk
-    # y_hat = y_hat.cpu().squeeze(0)  # Squeeze batch dimension if present
-    # out_audio = y_hat.reshape(2, 1)  # Transpose to have channels as the first dimension
-    # torchaudio.save(out_filepath, out_audio, 24000, channels_first=True)
-
-    # # Save input to disk
-    # x_audio = x_24000.squeeze(0).cpu()
-    # torchaudio.save(in_filepath, x_audio, 24000, channels_first=True)
 
     torchaudio.save(out_filepath, y_hat.cpu().view(1, -1), 24000) # 原为 y_hat.cpu().view(1, -1), 24000)
     torchaudio.save(in_filepath, x_24000.cpu().view(1, -1), 24000) # 原为 y_hat.cpu().view(1, -1), 24000)
     torchaudio.save(reference_filepath, r_24000.cpu().view(1, -1), 24000)
 
     # .view(1, -1)是将张量的形状转换为（1，-1），-1表示自动计算该维度的大小，以使得张量中的元素总数不变。一行n列，为单声道
-    system.shutdown()
 
+    # --------------- setup pre-trained model ---------------
+    models = {}
+    # peq_ckpt = "/import/c4dm-datasets/deepafx_st/logs/proxies/libritts/peq/lightning_logs/version_1/checkpoints/epoch=111-step=139999-val-libritts-peq.ckpt"
+    # comp_ckpt = "/import/c4dm-datasets/deepafx_st/logs/proxies/libritts/comp/lightning_logs/version_1/checkpoints/epoch=255-step=319999-val-libritts-comp.ckpt"
+
+    peq_ckpt = "/home/ma-user/work/l50032588/Network/DeepAFx-ST-main/checkpoints/proxies/jamendo/peq/lightning_logs/version_0/checkpoints/epoch=326-step=204374-val-jamendo-peq.ckpt"
+    comp_ckpt = "/home/ma-user/work/l50032588/Network/DeepAFx-ST-main/checkpoints/proxies/jamendo/comp/lightning_logs/version_0/checkpoints/epoch=274-step=171874-val-jamendo-comp.ckpt"
+    
+    ckpt_paths = [
+        "/home/ma-user/work/l50032588/Network/DeepAFx-ST-main/checkpoints/style/jamendo/autodiff/lightning_logs/version_0/checkpoints/epoch=362-step=1210241-val-jamendo-autodiff.ckpt", 
+        "/home/ma-user/work/l50032588/Network/DeepAFx-ST-main/checkpoints/style/jamendo/proxy0m/lightning_logs/version_0/checkpoints/epoch=331-step=276887-val-jamendo-proxy0.ckpt",
+        "/home/ma-user/work/l50032588/Network/DeepAFx-ST-main/checkpoints/style/jamendo/proxy2m/lightning_logs/version_0/checkpoints/epoch=341-step=285227-val-jamendo-proxy2.ckpt"
+        ]
+    
+    metrics_dict = {"Corrupt": {}, "Baseline": {}}
+
+    for ckpt_path in ckpt_paths:
+        model_name = os.path.basename(ckpt_path).replace(".ckpt", "")
+
+        if "proxy" in model_name:
+            use_dsp = DSPMode.INFER
+        else:
+            use_dsp = DSPMode.NONE
+
+        system = System.load_from_checkpoint(
+            ckpt_path,
+            use_dsp=use_dsp,
+            batch_size=1,
+            spsa_parallel=False,
+            proxy_ckpts=[peq_ckpt, comp_ckpt],
+            strict=False,
+        )
+        system.eval()
+        if args.gpu:
+            system.to("cuda")
+        models[model_name] = system
+
+        # metrics_dict[model_name] = {}
+        
+    autodiff_key = [key for key in models.keys() if "autodiff" in key][0]
+    tmp_system = models[autodiff_key]
+    # model_outputs[short_model_name] = y_hat_system  # store audio
+                
+    p_peq = p[:, :tmp_system.processor.peq.num_control_params].cpu()
+    p_comp = p[:, tmp_system.processor.peq.num_control_params :].cpu()
+
+    p_peq_denorm = tmp_system.processor.peq.denormalize_params(
+        p_peq.view(-1)
+    )
+    p_peq_denorm = [p.numpy() for p in p_peq_denorm] 
+    p_comp_denorm = tmp_system.processor.comp.denormalize_params(
+        p_comp.view(-1)
+    )
+    p_comp_denorm = [p.numpy() for p in p_comp_denorm]
+    print(p_peq_denorm)
+    print(p_comp_denorm)
+
+    system.shutdown()
